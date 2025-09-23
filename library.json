@@ -1,0 +1,20 @@
+{
+    "name": "GY33_Color_Sensor",
+    "version": "1.0.0",
+    "description": "Thư viện Arduino để giao tiếp với cảm biến màu GY-33 qua I2C",
+    "keywords": "color, sensor, gy-33, i2c, rgb, lux",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ThisBASE/GY33_Color_Sensor.git"
+    },
+    "authors": [
+        {
+            "name": "Your Name",
+            "email": "your.email@example.com",
+            "url": "https://your-website.com"
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}
