@@ -20,7 +20,8 @@ public:
 
   // Cấu hình
   void setLEDBrightness(uint8_t level);
-  void whiteBalanceCalibration();
+  bool whiteBalanceCalibration(bool verbose = true);
+  void autoWhiteBalanceWithFeedback();
 
   // Đọc dữ liệu
   void readAllData();
