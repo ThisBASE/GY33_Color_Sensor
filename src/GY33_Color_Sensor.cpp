@@ -17,7 +17,7 @@ bool GY33_Color_Sensor::begin(uint8_t sda, uint8_t scl) {
     return false;
   }
 
-  // Thiết lập độ sáng LED mặc định theo datasheet
+  // Thiết lập độ sáng LED mặc định
   setLEDBrightness(led_brightness);
 
   return true;
@@ -33,7 +33,10 @@ uint8_t GY33_Color_Sensor::read8Bit(uint8_t reg) {
   Wire.write(reg);
   Wire.endTransmission(false);
   Wire.requestFrom(i2c_address, 1);
-  return Wire.read();
+  if (Wire.available()) {
+    return Wire.read();
+  }
+  return 0;
 }
 
 uint16_t GY33_Color_Sensor::read16Bit(uint8_t reg) {
@@ -41,9 +44,12 @@ uint16_t GY33_Color_Sensor::read16Bit(uint8_t reg) {
   Wire.write(reg);
   Wire.endTransmission(false);
   Wire.requestFrom(i2c_address, 2);
-  uint16_t value = Wire.read() << 8;
-  value |= Wire.read();
-  return value;
+  if (Wire.available() >= 2) {
+    uint16_t value = Wire.read() << 8;
+    value |= Wire.read();
+    return value;
+  }
+  return 0;
 }
 
 void GY33_Color_Sensor::write8Bit(uint8_t reg, uint8_t value) {
@@ -54,7 +60,7 @@ void GY33_Color_Sensor::write8Bit(uint8_t reg, uint8_t value) {
 }
 
 void GY33_Color_Sensor::setLEDBrightness(uint8_t level) {
-  level = map(level, 0, 10, 10, 0); // Đảm bảo level trong khoảng 0-10
+  level = map(level, 0, 10, 10, 0); // Giới hạn mức độ sáng từ 0-10
   if (level > 10) level = 10;
 
   // Đọc giá trị config hiện tại
@@ -64,7 +70,6 @@ void GY33_Color_Sensor::setLEDBrightness(uint8_t level) {
   config &= 0x0F;
 
   // Thiết lập độ sáng mới (dịch level sang bits 7-4)
-  // THEO DATASHEET: level càng nhỏ → LED càng sáng
   config |= (level << 4);
 
   // Ghi giá trị config mới
@@ -73,17 +78,180 @@ void GY33_Color_Sensor::setLEDBrightness(uint8_t level) {
   led_brightness = level;
 }
 
-void GY33_Color_Sensor::whiteBalanceCalibration() {
-  // Kích hoạt cân bằng trắng (set bit 0 của config register)
+bool GY33_Color_Sensor::whiteBalanceCalibration(bool verbose) {
+  if (verbose) {
+    Serial.println("🚀 Bắt đầu hiệu chỉnh cân bằng trắng...");
+  }
+
+  // Bước 1: Đọc giá trị ban đầu
+  readAllData();
+  if (verbose) {
+    Serial.print("📊 Giá trị trước hiệu chỉnh - R:");
+    Serial.print(raw_red);
+    Serial.print(" G:");
+    Serial.print(raw_green);
+    Serial.print(" B:");
+    Serial.println(raw_blue);
+  }
+
+  // Bước 2: Kiểm tra điều kiện ánh sáng
+  if (raw_clear < 100) { // Ngưỡng tối thiểu
+    if (verbose) {
+      Serial.println("❌ Ánh sáng không đủ cho hiệu chỉnh! (Clear < 100)");
+    }
+    return false;
+  }
+
+  // Bước 3: Kiểm tra sự chênh lệch màu quá lớn
+  uint16_t max_val = max(raw_red, max(raw_green, raw_blue));
+  uint16_t min_val = min(raw_red, min(raw_green, raw_blue));
+
+  if (max_val > 0 && (max_val - min_val) * 10 / max_val > 8) {
+    if (verbose) {
+      Serial.println("❌ Vật thể không phải màu trắng chuẩn!");
+    }
+    return false;
+  }
+
+  // Bước 4: Kích hoạt chế độ hiệu chuẩn
   uint8_t config = read8Bit(REG_CONFIG);
-  config |= 0x01; // Set bit 0
+  config |= 0x01; // Set bit 0 - White Balance Enable
   write8Bit(REG_CONFIG, config);
 
-  delay(1000); // Đợi hiệu chỉnh hoàn tất
+  if (verbose) {
+    Serial.println("⏳ Đang hiệu chỉnh... (1.5 giây)");
+  }
 
-  // Tắt chế độ hiệu chỉnh
+  // Bước 5: Chờ hiệu chỉnh hoàn tất
+  delay(1500); // Thời gian theo datasheet
+
+  // Bước 6: Tắt chế độ hiệu chuẩn
   config &= ~0x01; // Clear bit 0
   write8Bit(REG_CONFIG, config);
+
+  // Bước 7: Xác minh kết quả
+  delay(100);
+  readAllData();
+
+  if (verbose) {
+    Serial.print("✅ Giá trị sau hiệu chỉnh - R:");
+    Serial.print(raw_red);
+    Serial.print(" G:");
+    Serial.print(raw_green);
+    Serial.print(" B:");
+    Serial.println(raw_blue);
+  }
+
+  // Bước 8: Kiểm tra kết quả (R≈G≈B cho vật thể trắng)
+  if (raw_green == 0) raw_green = 1; // Tránh chia cho 0
+  if (raw_blue == 0) raw_blue = 1;
+
+  float ratio_rg = (float)raw_red / raw_green;
+  float ratio_rb = (float)raw_red / raw_blue;
+  float ratio_gb = (float)raw_green / raw_blue;
+
+  bool success = (ratio_rg > 0.7f && ratio_rg < 1.3f &&
+                  ratio_rb > 0.7f && ratio_rb < 1.3f &&
+                  ratio_gb > 0.7f && ratio_gb < 1.3f);
+
+  if (verbose) {
+    if (success) {
+      Serial.println("🎯 Hiệu chỉnh thành công! Các giá trị RGB cân bằng.");
+    } else {
+      Serial.println("⚠️ Hiệu chỉnh có thể chưa tối ưu");
+      Serial.print("Tỷ lệ R/G: ");
+      Serial.print(ratio_rg, 2);
+      Serial.print(", R/B: ");
+      Serial.print(ratio_rb, 2);
+      Serial.print(", G/B: ");
+      Serial.println(ratio_gb, 2);
+    }
+  }
+
+  return success;
+}
+
+void GY33_Color_Sensor::autoWhiteBalanceWithFeedback() {
+  Serial.println("\n🔧 CHẾ ĐỘ HIỆU CHUẨN CÂN BẰNG TRẮNG");
+  Serial.println("==========================================");
+  Serial.println("📋 HƯỚNG DẪN:");
+  Serial.println("1. Đặt cảm biến hướng về vật thể màu TRẮNG");
+  Serial.println("2. Đảm bảo ánh sáng ổn định và đủ mạnh");
+  Serial.println("3. Vật thể trắng nên chiếm toàn bộ vùng cảm biến");
+  Serial.println("4. Giữ khoảng cách 2-5cm");
+  Serial.println();
+  Serial.println("⌨️ LỆNH:");
+  Serial.println("c - Bắt đầu hiệu chuẩn");
+  Serial.println("x - Hủy bỏ");
+  Serial.println("? - Hiển thị hướng dẫn này");
+  Serial.println("==========================================");
+
+  bool waitingForCommand = true;
+
+  while (waitingForCommand) {
+    if (Serial.available()) {
+      char cmd = Serial.read();
+
+      switch (cmd) {
+      case 'c': // Bắt đầu hiệu chuẩn
+      {
+        Serial.println("\n🎯 Bắt đầu hiệu chuẩn...");
+
+        // Kiểm tra ánh sáng trước
+        readAllData();
+        Serial.print("💡 Cường độ ánh sáng (Clear): ");
+        Serial.println(raw_clear);
+
+        if (raw_clear < 100) {
+          Serial.println("❌ Ánh sáng quá yếu! Vui lòng cải thiện ánh sáng.");
+          Serial.println("💡 Gợi ý: Đưa cảm biến gần hơn hoặc tăng cường độ sáng");
+          break;
+        }
+
+        Serial.println("⏳ Đang thực hiện hiệu chuẩn...");
+
+        if (whiteBalanceCalibration(true)) {
+          Serial.println("💾 Hiệu chỉnh đã được lưu thành công!");
+          Serial.println("✅ Có thể sử dụng cảm biến ngay bây giờ.");
+        } else {
+          Serial.println("❌ Hiệu chỉnh thất bại! Vui lòng thử lại.");
+          Serial.println("💡 Gợi ý: Kiểm tra vật thể trắng và ánh sáng");
+        }
+
+        waitingForCommand = false;
+      } break;
+
+      case 'x': // Hủy bỏ
+        Serial.println("❌ Hủy hiệu chỉnh");
+        waitingForCommand = false;
+        break;
+
+      case '?': // Hiển thị hướng dẫn
+        Serial.println("\n🔧 CHẾ ĐỘ HIỆU CHUẨN CÂN BẰNG TRẮNG");
+        Serial.println("==========================================");
+        Serial.println("📋 HƯỚNG DẪN:");
+        Serial.println("1. Đặt cảm biến hướng về vật thể màu TRẮNG");
+        Serial.println("2. Đảm bảo ánh sáng ổn định và đủ mạnh");
+        Serial.println("3. Vật thể trắng nên chiếm toàn bộ vùng cảm biến");
+        Serial.println("4. Giữ khoảng cách 2-5cm");
+        Serial.println();
+        Serial.println("⌨️ LỆNH:");
+        Serial.println("c - Bắt đầu hiệu chuẩn");
+        Serial.println("x - Hủy bỏ");
+        Serial.println("? - Hiển thị hướng dẫn này");
+        Serial.println("==========================================");
+        break;
+
+      default:
+        // Bỏ qua các ký tự không hợp lệ
+        break;
+      }
+    }
+
+    delay(100); // Tránh chiếm CPU
+  }
+
+  Serial.println("🔚 Thoát chế độ hiệu chuẩn");
 }
 
 void GY33_Color_Sensor::readAllData() {
@@ -155,19 +323,19 @@ void GY33_Color_Sensor::printData() {
   Serial.print(color_value, HEX);
   Serial.println(")");
 
-  // Hiển thị độ sáng LED (theo datasheet)
-  Serial.print("Độ sáng LED (0-10, 0=sáng nhất): ");
+  // Hiển thị độ sáng LED hiện tại
+  Serial.print("Độ sáng LED: ");
   Serial.println(led_brightness);
 
   Serial.println("==============================================");
 }
 
 void GY33_Color_Sensor::printHelp() {
-  Serial.println("===== TRỢ GIÚP LỆNH =====");
-  Serial.println("b - Tăng độ sáng LED (giá trị số giảm, LED sáng hơn)");
-  Serial.println("d - Giảm độ sáng LED (giá trị số tăng, LED tối hơn)");
-  Serial.println("w - Hiệu chỉnh cân bằng trắng");
-  Serial.println("? - Hiển thị trợ giúp này");
-  Serial.println("LƯU Ý: Giá trị độ sáng 0 = sáng nhất, 10 = tối nhất");
-  Serial.println("=========================");
+  Serial.println("===== TRỢ GIÚP LỆNH GY-33 =====");
+  Serial.println("b     - Tăng độ sáng LED");
+  Serial.println("d     - Giảm độ sáng LED");
+  Serial.println("w     - Hiệu chỉnh cân bằng trắng (tự động)");
+  Serial.println("w1    - Hiệu chỉnh cân bằng trắng (chi tiết)");
+  Serial.println("?     - Hiển thị trợ giúp này");
+  Serial.println("================================");
 }
